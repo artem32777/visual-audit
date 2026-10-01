@@ -1,0 +1,17 @@
+{
+  "name": "codex-visual-audit",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "pixelmatch": "7.2.0",
+    "playwright": "1.63.0",
+    "pngjs": "7.0.0"
+  }
+}

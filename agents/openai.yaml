@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visual Audit"
+  short_description: "Проверка страницы на ширине фрейма или изображения"
+  default_prompt: "Используй $visual-audit: эталоны <одна или несколько ссылок на фреймы Figma либо изображения>, страница <название или URL страницы проекта>."
