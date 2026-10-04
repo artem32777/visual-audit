@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
-import { assert, cli, loadConfig, writeJson } from './common.mjs';
+import { assert, cli, loadConfig, writeJson, savePng } from './common.mjs';
 export const capture = async (configFile) => {
   assert(configFile, 'Usage: node scripts/capture.mjs <config.json>');
   const config = await loadConfig(configFile);
@@ -12,14 +12,12 @@ export const capture = async (configFile) => {
   assert(!config.prepare || typeof prepare === 'function', 'prepare module must export a default async arrow function');
   // Never mix a new capture with old screenshots or reviewed findings.
   await fs.mkdir(path.dirname(config.output), { recursive: true });
-  await fs.mkdir(config.output);
+  assert(!(await fs.stat(config.output).catch(error => { if (error.code === 'ENOENT') return null; throw error; })), 'Output already exists; choose a new run directory');
   const browser = await chromium.launch(config.channel ? { channel: config.channel } : {});
-  const result = { title: config.title, url: config.url, createdAt: new Date().toISOString(), browser: browser.version(), platform: process.platform, threshold: config.threshold, notes: config.notes, views: [] };
+  const result = { title: config.title, url: config.url, createdAt: new Date().toISOString(), browser: browser.version(), channel: config.channel, platform: process.platform, threshold: config.threshold, notes: config.notes, views: [] };
   try {
     for (const view of config.views) {
       const dir = path.join(config.output, view.id);
-      await fs.mkdir(dir);
-      await fs.copyFile(view.design, path.join(dir, 'design.png'));
       const warnings = [];
       const context = await browser.newContext({ viewport: { width: view.width, height: view.viewportHeight }, deviceScaleFactor: 1, colorScheme: 'light', reducedMotion: 'reduce', locale: config.locale ?? 'ru-RU', ...(config.storageState ? { storageState: config.storageState } : {}) });
       try {
@@ -30,7 +28,17 @@ export const capture = async (configFile) => {
         assert(response && response.ok(), `Page returned HTTP ${response?.status() ?? 'no response'} at ${view.width}`);
         if (page.url() !== config.url) warnings.push('Страница перенаправлена. Проверьте, что открыт нужный маршрут и состояние.');
         if (prepare) await prepare(page, view.width);
-        if (config.readySelector) await page.locator(config.readySelector).waitFor({ state: 'visible' });
+        for (const [key, selector] of [['readySelector', view.readySelector], ['captureSelector', view.captureSelector]]) {
+          if (!selector) continue;
+          const locator = page.locator(selector);
+          await locator.first().waitFor({ state: 'attached' });
+          assert(await locator.count() === 1, `${key} must match exactly one element: ${selector}`);
+          await locator.waitFor({ state: 'visible' });
+        }
+        // Do not create result artifacts until navigation and selectors pass.
+        if (result.views.length === 0) await fs.mkdir(config.output);
+        await fs.mkdir(dir);
+        await fs.copyFile(view.design, path.join(dir, 'design.png'));
         await page.addStyleTag({ content: 'html { scroll-behavior: auto !important; } *, *::before, *::after { transition: none !important; caret-color: transparent !important; }' });
         await page.waitForFunction(() => document.fonts.status === 'loaded');
         // Bounded traversal triggers lazy images without hanging on infinite feeds.
@@ -70,8 +78,24 @@ export const capture = async (configFile) => {
         if (stabilityPercent !== 0) warnings.push('Скриншоты не стабилизировались; динамические области требуют проверки.');
         const actual = PNG.sync.read(current);
         if (actual.width !== view.width) warnings.push(`Горизонтальное переполнение: скриншот ${actual.width}px при окне ${view.width}px.`);
-        await fs.writeFile(path.join(dir, 'actual.png'), current);
-        result.views.push({ id: view.id, width: view.width, viewportHeight: view.viewportHeight, figmaUrl: view.figmaUrl, designVersion: view.designVersion ?? null, stabilityPercent, warnings });
+        let captureRegion;
+        if (view.captureSelector) {
+          const locator = page.locator(view.captureSelector);
+          assert(await locator.count() === 1, 'captureSelector changed during capture');
+          const bounds = await locator.boundingBox();
+          assert(bounds && bounds.height > 0, 'Capture target has no visible bounds');
+          const y = Math.floor(bounds.y), bottom = Math.ceil(bounds.y + bounds.height);
+          assert(y >= 0 && bottom <= actual.height, 'Capture target lies outside full screenshot');
+          // Keep the entire horizontal canvas: do not align or hide overflow.
+          captureRegion = { x: 0, y, width: actual.width, height: bottom - y, elementBounds: bounds };
+          const cropped = new PNG({ width: actual.width, height: bottom - y });
+          PNG.bitblt(actual, cropped, 0, y, actual.width, bottom - y, 0, 0);
+          await fs.writeFile(path.join(dir, 'actual-full-page.png'), current);
+          await savePng(path.join(dir, 'actual.png'), cropped);
+          await writeJson(path.join(dir, 'capture-region.json'), captureRegion);
+          warnings.push(`Сравнивается секция по ${view.captureSelector}; вырезка y=${y}, высота ${bottom-y}px, полная ширина сохранена. Внешнее положение на странице не сравнивается; полный снимок сохранён.`);
+        } else await fs.writeFile(path.join(dir, 'actual.png'), current);
+        result.views.push({ id: view.id, width: view.width, viewportHeight: view.viewportHeight, figmaUrl: view.figmaUrl, designVersion: view.designVersion ?? null, captureSelector: view.captureSelector, captureRegion, stabilityPercent, warnings });
         console.log(`Captured ${view.width} × ${actual.height}`);
       } finally { await context.close(); }
     }

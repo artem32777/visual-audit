@@ -53,6 +53,9 @@ export const loadConfig = async (file) => {
   assert(Number.isFinite(config.threshold) && config.threshold >= 0 && config.threshold <= 1, 'threshold must be 0..1');
   config.output = path.resolve(base, config.output);
   for (const view of config.views) {
+    view.captureSelector ??= config.captureSelector;
+    view.readySelector ??= config.readySelector;
+    for (const key of ['captureSelector', 'readySelector']) assert(view[key] === undefined || (typeof view[key] === 'string' && view[key].trim()), `${key} must be a non-empty selector`);
     assert(typeof view.design === 'string' && view.design, `Missing design PNG for ${view.width}`);
     view.design = path.resolve(base, view.design);
     view.viewportHeight ??= defaultViewportHeight;
